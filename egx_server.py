@@ -117,7 +117,7 @@ def fetch_stock(ticker: str, name: str) -> dict:
         t    = yf.Ticker(ticker)
         info = t.info
 
-        price      = info.get("regularMarketPrice") or info.get("currentPrice")
+        price      = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
         prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
         volume     = info.get("regularMarketVolume")
 
@@ -303,30 +303,25 @@ async def messages(request: Request):
 @app.get("/debug/{symbol}")
 def debug(symbol: str):
     """Find correct Yahoo Finance ticker for an EGX stock"""
-    try:
-        # Search Yahoo Finance for the symbol
-        r = requests.get(
-            "https://query2.finance.yahoo.com/v1/finance/search",
-            params={"q": f"{symbol} Egypt", "lang": "en-US", "region": "US", "quotesCount": 5},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
-        results = r.json().get("quotes", [])
-        # Also test the ISIN ticker directly
-        isin_ticker = f"EGS38191C010.CA" if symbol == "ABUK" else f"{symbol}.CA"
-        t = yf.Ticker(isin_ticker)
-        info = t.info
-        return {
-            "search_results": [{"symbol": q.get("symbol"), "name": q.get("longname"), "exchange": q.get("exchange")} for q in results],
-            "direct_test": {
-                "ticker": isin_ticker,
-                "regularMarketPrice": info.get("regularMarketPrice"),
-                "currentPrice": info.get("currentPrice"),
-                "previousClose": info.get("previousClose"),
+    # Test both symbol.CA and known ISIN patterns
+    tickers_to_test = [
+        f"{symbol}.CA",
+        f"{symbol}.EGX",
+    ]
+    results = {}
+    for ticker in tickers_to_test:
+        try:
+            t    = yf.Ticker(ticker)
+            info = t.info
+            price = info.get("regularMarketPrice") or info.get("currentPrice")
+            results[ticker] = {
+                "regularMarketPrice": price,
+                "previousClose": info.get("regularMarketPreviousClose") or info.get("previousClose"),
+                "longName": info.get("longName"),
             }
-        }
-    except Exception as e:
-        return {"error": str(e)}
+        except Exception as e:
+            results[ticker] = {"error": str(e)}
+    return results
     return {"status": "ok", "time": datetime.now().isoformat(), "market_open": is_egx_open()}
 
 @app.get("/prices")
