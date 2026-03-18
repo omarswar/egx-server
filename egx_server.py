@@ -98,7 +98,7 @@ MCP_TOOLS = [
 
 @app.get("/.well-known/oauth-authorization-server")
 def oauth_metadata(request: Request):
-    base = str(request.base_url).rstrip("/")
+    base = str(request.base_url).rstrip("/").replace("http://", "https://")
     return JSONResponse({
         "issuer": base,
         "authorization_endpoint": f"{base}/oauth/authorize",
