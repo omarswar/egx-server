@@ -1,15 +1,15 @@
 """
-EGX MCP Server — yfinance with clean realistic prices
+EGX MCP Server — EODHD for accurate prices on any EGX stock
 """
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
-import yfinance as yf
 import requests
 import json
 import asyncio
 import logging
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -24,67 +24,37 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# Correct Yahoo Finance tickers for EGX stocks (using ISIN.CA format where needed)
+EODHD_API_KEY = os.environ.get("EODHD_API_KEY", "69b4c98254dc11.70718475")
+EODHD_BASE    = "https://eodhd.com/api"
+
 WATCHLIST = {
-    'COMI.CA':          'Commercial International Bank',
-    'EAST.CA':          'Eastern Company',
-    'TMGH.CA':          'Talaat Moustafa Group',
-    'SWDY.CA':          'ElSewedy Electric',
-    'HRHO.CA':          'Emaar Misr',
-    'EFIC.CA':          'EFG Hermes',
-    'JUFO.CA':          'Juhayna Food Industries',
-    'CSAG.CA':          'Canal Shipping Agencies',
-    'SKPC.CA':          'Sidi Kerir Petrochemicals',
-    'EGS38191C010.CA':  'Abu Kir Fertilizers',       # ABUK
-    'MFPC.CA':          'Misr Fertilizers',
-    'ETEL.CA':          'Telecom Egypt',
-}
-
-# Map clean symbol to ticker for single stock lookup
-SYMBOL_MAP = {
-    'COMI': 'COMI.CA',
-    'EAST': 'EAST.CA',
-    'TMGH': 'TMGH.CA',
-    'SWDY': 'SWDY.CA',
-    'HRHO': 'HRHO.CA',
-    'EFIC': 'EFIC.CA',
-    'JUFO': 'JUFO.CA',
-    'CSAG': 'CSAG.CA',
-    'SKPC': 'SKPC.CA',
-    'ABUK': 'EGS38191C010.CA',
-    'MFPC': 'MFPC.CA',
-    'ETEL': 'ETEL.CA',
-}
-
-# Known reasonable price ranges for sanity check (EGP)
-PRICE_RANGES = {
-    'COMI':  (50,   200),
-    'EAST':  (10,   80),
-    'TMGH':  (20,   150),
-    'SWDY':  (30,   150),
-    'HRHO':  (5,    60),
-    'EFIC':  (50,   400),
-    'JUFO':  (5,    50),
-    'CSAG':  (10,   60),
-    'SKPC':  (5,    50),
-    'ABUK':  (60,   150),
-    'MFPC':  (20,   100),
-    'ETEL':  (30,   150),
+    'COMI': 'Commercial International Bank',
+    'EAST': 'Eastern Company',
+    'TMGH': 'Talaat Moustafa Group',
+    'SWDY': 'ElSewedy Electric',
+    'HRHO': 'Emaar Misr',
+    'EFIC': 'EFG Hermes',
+    'JUFO': 'Juhayna Food Industries',
+    'CSAG': 'Canal Shipping Agencies',
+    'SKPC': 'Sidi Kerir Petrochemicals',
+    'ABUK': 'Abu Kir Fertilizers',
+    'MFPC': 'Misr Fertilizers',
+    'ETEL': 'Telecom Egypt',
 }
 
 MCP_TOOLS = [
     {
         "name": "get_egx_prices",
-        "description": "Get live EGX stock prices for the full watchlist. Returns price in EGP, change %, volume, and market status.",
+        "description": "Get accurate prices for all EGX watchlist stocks.",
         "inputSchema": {"type": "object", "properties": {}, "required": []}
     },
     {
         "name": "get_egx_stock",
-        "description": "Get live price for any single EGX stock by ticker symbol e.g. COMI, CSAG, EAST.",
+        "description": "Get accurate price for ANY EGX stock by ticker symbol. Works for any stock on the Egyptian Exchange, not just the watchlist.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "symbol": {"type": "string", "description": "EGX stock ticker e.g. COMI, CSAG"}
+                "symbol": {"type": "string", "description": "Any EGX ticker e.g. COMI, CSAG, ABUK, ORWE, AMOC"}
             },
             "required": ["symbol"]
         }
@@ -95,7 +65,7 @@ MCP_TOOLS = [
 
 def is_egx_open() -> bool:
     now     = datetime.now(ZoneInfo("Africa/Cairo"))
-    weekday = now.weekday()  # 0=Mon, 6=Sun
+    weekday = now.weekday()
     h, m    = now.hour, now.minute
     is_trading_day  = weekday in (6, 0, 1, 2, 3)
     is_trading_hour = (h == 10 and m >= 0) or (10 < h < 14) or (h == 14 and m <= 30)
@@ -103,48 +73,49 @@ def is_egx_open() -> bool:
 
 # ─── Price logic ──────────────────────────────────────────────────────────────
 
-# Reverse map: ticker -> clean symbol
-SYMBOL_MAP_REVERSE = {v: k for k, v in SYMBOL_MAP.items()}
-
-def is_sane(symbol: str, price: float) -> bool:
-    """Check if price is within expected range for this stock"""
-    lo, hi = PRICE_RANGES.get(symbol, (0.1, 100000))
-    return lo <= price <= hi
-
-def fetch_stock(ticker: str, name: str) -> dict:
-    symbol = ticker.replace('.CA', '')
+def parse_val(val):
     try:
-        t    = yf.Ticker(ticker)
-        info = t.info
+        v = float(val)
+        return v if v > 0 else None
+    except:
+        return None
 
-        price      = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
-        prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
-        volume     = info.get("regularMarketVolume")
+def fetch_stock(symbol: str, name: str = None) -> dict:
+    sym  = symbol.upper().replace('.CA', '').replace('.EGX', '')
+    name = name or WATCHLIST.get(sym, sym)
+    try:
+        # Try live real-time endpoint first
+        r = requests.get(
+            f"{EODHD_BASE}/real-time/{sym}.EGX",
+            params={"api_token": EODHD_API_KEY, "fmt": "json"},
+            timeout=15
+        )
+        r.raise_for_status()
+        d = r.json()
+        logging.info(f"EODHD real-time {sym}: {d}")
 
-        price      = round(float(price), 2)      if price      else None
-        prev_close = round(float(prev_close), 2) if prev_close else None
-        volume     = int(volume)                 if volume      else None
-
-        # Sanity check — if price is way outside expected range, discard it
-        if price and not is_sane(symbol, price):
-            logging.warning(f"{symbol}: price {price} is outside expected range, discarding")
-            price = None
-
-        # Only show change % if both prices are sane and market is open
+        live_price = parse_val(d.get("close"))
+        prev_close = parse_val(d.get("previousClose"))
+        change_pct = parse_val(d.get("change_p"))
+        volume     = parse_val(d.get("volume"))
         market_open = is_egx_open()
-        change_pct  = None
-        if price and prev_close and is_sane(symbol, prev_close) and market_open:
-            raw_chg = ((price - prev_close) / prev_close) * 100
-            # Cap change % at ±15% — anything beyond is likely bad data
-            if abs(raw_chg) <= 15:
-                change_pct = round(raw_chg, 2)
-            else:
-                logging.warning(f"{symbol}: change {raw_chg:.1f}% exceeds 15%, likely bad data")
 
-        status = "live" if market_open and price else "market_closed" if price else "unavailable"
+        # Use live price if available, else fall back to previousClose
+        price = live_price if live_price else prev_close
+
+        if price:      price      = round(price, 2)
+        if prev_close: prev_close = round(prev_close, 2)
+        if change_pct: change_pct = round(change_pct, 2)
+        if volume:     volume     = int(volume)
+
+        # Only show change % when market is open and we have live data
+        if not live_price or not market_open:
+            change_pct = None
+
+        status = "live" if market_open and live_price else "last_close" if price else "unavailable"
 
         return {
-            "symbol":      symbol,
+            "symbol":      sym,
             "name":        name,
             "price":       price,
             "prev_close":  prev_close,
@@ -152,20 +123,21 @@ def fetch_stock(ticker: str, name: str) -> dict:
             "volume":      volume,
             "market_open": market_open,
             "status":      status,
+            "note":        "Live intraday price" if live_price else "Last session closing price — EODHD free tier",
             "timestamp":   datetime.now().isoformat(),
-            "source":      "yahoo_finance"
+            "source":      "eodhd.com"
         }
     except Exception as e:
-        logging.error(f"yfinance failed for {ticker}: {e}")
+        logging.error(f"EODHD failed for {sym}: {e}")
         return {
-            "symbol": symbol, "name": name,
+            "symbol": sym, "name": name,
             "price": None, "change_pct": None, "volume": None,
             "market_open": False, "status": "unavailable",
             "timestamp": datetime.now().isoformat(), "source": "unavailable"
         }
 
 def get_all_prices():
-    stocks  = [fetch_stock(t, n) for t, n in WATCHLIST.items()]
+    stocks  = [fetch_stock(s, n) for s, n in WATCHLIST.items()]
     valid   = [s for s in stocks if s.get("price")]
     gainers = [s for s in valid if s.get("change_pct") and s["change_pct"] > 0]
     losers  = [s for s in valid if s.get("change_pct") and s["change_pct"] < 0]
@@ -178,18 +150,14 @@ def get_all_prices():
                         "flat":    len(valid) - len(gainers) - len(losers)}
     }
 
-def get_single_price(symbol: str):
-    sym    = symbol.upper().replace('.CA', '')
-    ticker = f"{sym}.CA"
-    return fetch_stock(ticker, WATCHLIST.get(ticker, sym))
-
 # ─── Tool execution ───────────────────────────────────────────────────────────
 
 def execute_tool(name: str, args: dict) -> str:
     if name == "get_egx_prices":
         return json.dumps(get_all_prices())
     elif name == "get_egx_stock":
-        return json.dumps(get_single_price(args.get("symbol", "")))
+        sym = args.get("symbol", "")
+        return json.dumps(fetch_stock(sym))
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 def make_response(mid, result):
@@ -300,28 +268,8 @@ async def messages(request: Request):
 
 # ─── REST endpoints ───────────────────────────────────────────────────────────
 
-@app.get("/debug/{symbol}")
-def debug(symbol: str):
-    """Find correct Yahoo Finance ticker for an EGX stock"""
-    # Test both symbol.CA and known ISIN patterns
-    tickers_to_test = [
-        f"{symbol}.CA",
-        f"{symbol}.EGX",
-    ]
-    results = {}
-    for ticker in tickers_to_test:
-        try:
-            t    = yf.Ticker(ticker)
-            info = t.info
-            price = info.get("regularMarketPrice") or info.get("currentPrice")
-            results[ticker] = {
-                "regularMarketPrice": price,
-                "previousClose": info.get("regularMarketPreviousClose") or info.get("previousClose"),
-                "longName": info.get("longName"),
-            }
-        except Exception as e:
-            results[ticker] = {"error": str(e)}
-    return results
+@app.get("/health")
+def health():
     return {"status": "ok", "time": datetime.now().isoformat(), "market_open": is_egx_open()}
 
 @app.get("/prices")
@@ -330,4 +278,4 @@ def prices():
 
 @app.get("/price/{symbol}")
 def price(symbol: str):
-    return get_single_price(symbol)
+    return fetch_stock(symbol)
