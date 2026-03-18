@@ -1,19 +1,49 @@
 """
-EGX MCP Server — prices via Twelve Data API
+EGX MCP Server — prices scraped from Arab Finance
 """
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 import requests
+from bs4 import BeautifulSoup
 import json
 import asyncio
 import logging
-import os
+import re
 from datetime import datetime
 
-TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY", "c9a66d1c2370438daa76b1d5d22498b4")
-TWELVE_BASE    = "https://api.twelvedata.com"
+logging.basicConfig(level=logging.INFO)
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
+WATCHLIST = {
+    'COMI': 'Commercial International Bank',
+    'EAST': 'Eastern Company',
+    'TMGH': 'Talaat Moustafa Group',
+    'SWDY': 'ElSewedy Electric',
+    'HRHO': 'Emaar Misr',
+    'EFIC': 'EFG Hermes',
+    'JUFO': 'Juhayna Food Industries',
+    'CSAG': 'Canal Shipping Agencies',
+    'SKPC': 'Sidi Kerir Petrochemicals',
+    'ABUK': 'Abu Kir Fertilizers',
+    'MFPC': 'Misr Fertilizers',
+    'ETEL': 'Telecom Egypt',
+}
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
