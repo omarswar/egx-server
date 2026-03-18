@@ -23,8 +23,9 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# Hardcoded as fallback — set TWELVE_API_KEY in Railway env vars to override
-TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY", "c9a66d1c2370438daa76b1d5d22498b4")
+# EODHD API — EGX stocks use .EGX suffix
+EODHD_API_KEY = os.environ.get("EODHD_API_KEY", "69b4c98254dc11.70718475")
+EODHD_BASE    = "https://eodhd.com/api"
 
 WATCHLIST = {
     'COMI': 'Commercial International Bank',
@@ -78,26 +79,19 @@ def is_egx_open() -> bool:
 
 def fetch_stock(symbol: str, name: str) -> dict:
     try:
-        # Single API call using /quote endpoint — returns price + prev_close + change + volume
         r = requests.get(
-            "https://api.twelvedata.com/quote",
-            params={"symbol": symbol, "exchange": "XCAI", "apikey": TWELVE_API_KEY},
+            f"{EODHD_BASE}/real-time/{symbol}.EGX",
+            params={"api_token": EODHD_API_KEY, "fmt": "json"},
             timeout=15
         )
         r.raise_for_status()
         d = r.json()
+        logging.info(f"EODHD response for {symbol}: {d}")
 
-        # Log raw response for debugging
-        logging.info(f"Twelve Data response for {symbol}: {d}")
-
-        if d.get("status") == "error" or "code" in d:
-            logging.warning(f"Twelve Data error for {symbol}: {d.get('message', d)}")
-            return _unavailable(symbol, name)
-
-        price      = round(float(d["close"]), 2)            if d.get("close")            else None
-        prev_close = round(float(d["previous_close"]), 2)   if d.get("previous_close")   else None
-        change_pct = round(float(d["percent_change"]), 2)   if d.get("percent_change")   else None
-        volume     = int(d["volume"])                        if d.get("volume")           else None
+        price      = round(float(d["close"]), 2)                        if d.get("close")          else None
+        prev_close = round(float(d["previousClose"]), 2)                if d.get("previousClose")  else None
+        change_pct = round(float(d["change_p"]), 2)                     if d.get("change_p")       else None
+        volume     = int(d["volume"])                                    if d.get("volume")         else None
         market_open = is_egx_open()
 
         return {
@@ -110,10 +104,10 @@ def fetch_stock(symbol: str, name: str) -> dict:
             "market_open": market_open,
             "status":      "live" if market_open and price else "market_closed" if price else "unavailable",
             "timestamp":   datetime.now().isoformat(),
-            "source":      "twelvedata.com"
+            "source":      "eodhd.com"
         }
     except Exception as e:
-        logging.error(f"fetch_stock failed for {symbol}: {e}")
+        logging.error(f"EODHD fetch failed for {symbol}: {e}")
         return _unavailable(symbol, name)
 
 def _unavailable(symbol, name):
@@ -265,7 +259,7 @@ def health():
         "status": "ok",
         "time": datetime.now().isoformat(),
         "market_open": is_egx_open(),
-        "api_key_set": bool(TWELVE_API_KEY)
+        "eodhd_key_set": bool(EODHD_API_KEY)
     }
 
 @app.get("/prices")
@@ -278,21 +272,13 @@ def price(symbol: str):
 
 @app.get("/debug/{symbol}")
 def debug(symbol: str):
-    """Test multiple symbol formats against Twelve Data"""
-    results = {}
-    formats = [
-        {"symbol": symbol.upper(), "exchange": "XCAI"},
-        {"symbol": f"{symbol.upper()}:XCAI"},
-        {"symbol": symbol.upper(), "country": "Egypt"},
-        {"symbol": symbol.upper(), "exchange": "EGX"},
-        {"symbol": symbol.upper(), "exchange": "CAI"},
-    ]
-    for params in formats:
-        try:
-            p = {**params, "apikey": TWELVE_API_KEY}
-            r = requests.get("https://api.twelvedata.com/quote", params=p, timeout=10)
-            key = str(params)
-            results[key] = r.json()
-        except Exception as e:
-            results[str(params)] = {"error": str(e)}
-    return results
+    """Test EODHD API directly"""
+    try:
+        r = requests.get(
+            f"{EODHD_BASE}/real-time/{symbol.upper()}.EGX",
+            params={"api_token": EODHD_API_KEY, "fmt": "json"},
+            timeout=15
+        )
+        return {"status": r.status_code, "raw": r.json()}
+    except Exception as e:
+        return {"error": str(e)}
