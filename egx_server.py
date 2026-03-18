@@ -1,15 +1,19 @@
 """
-EGX MCP Server — prices + market status
+EGX MCP Server — prices via Twelve Data API
 """
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
-import yfinance as yf
+import requests
 import json
 import asyncio
 import logging
+import os
 from datetime import datetime
+
+TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY", "c9a66d1c2370438daa76b1d5d22498b4")
+TWELVE_BASE    = "https://api.twelvedata.com"
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
@@ -131,8 +135,9 @@ def get_all_prices():
     }
 
 def get_single_price(symbol: str):
-    ticker = f"{symbol.upper()}.CA"
-    return fetch_stock(ticker, WATCHLIST.get(ticker, symbol.upper()))
+    clean = symbol.upper().replace('.CA', '')
+    ticker = f"{clean}.CA"
+    return fetch_stock(ticker, WATCHLIST.get(ticker, clean))
 
 # ─── Tool execution ───────────────────────────────────────────────────────────
 
