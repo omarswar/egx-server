@@ -1,5 +1,5 @@
 """
-EGX MCP Server — prices + charts + portfolio + alerts + technicals + macro
+EGX MCP Server — prices + market status
 """
 
 from fastapi import FastAPI, Request
@@ -10,8 +10,6 @@ import json
 import asyncio
 import logging
 from datetime import datetime
-from typing import Optional
-import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
@@ -39,277 +37,229 @@ WATCHLIST = {
     'ETEL.CA': 'Telecom Egypt',
 }
 
-# ─── In-memory storage (persists while server is running) ────────────────────
-PORTFOLIO = {}   # { "COMI": {"qty": 100, "avg_buy": 65.0} }
-ALERTS    = {}   # { "CSAG": {"above": 30.0, "below": 25.0} }
+MCP_TOOLS = [
+    {
+        "name": "get_egx_prices",
+        "description": "Get live EGX stock prices for the full watchlist. Returns price in EGP, change %, volume, and market status.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "get_egx_stock",
+        "description": "Get live price for any single EGX stock by ticker symbol e.g. COMI, CSAG, EAST.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "EGX stock ticker e.g. COMI, CSAG"}
+            },
+            "required": ["symbol"]
+        }
+    }
+]
 
-# ─── Price logic ──────────────────────────────────────────────────────────────
+# ─── Market hours ─────────────────────────────────────────────────────────────
 
 def is_egx_open() -> bool:
     """EGX trades Sun-Thu 10:00-14:30 Cairo time (UTC+2)"""
-    now = datetime.utcnow()
+    now          = datetime.utcnow()
     cairo_hour   = (now.hour + 2) % 24
     cairo_minute = now.minute
-    weekday      = now.weekday()  # 0=Mon, 6=Sun
-    is_trading_day = weekday in (6, 0, 1, 2, 3)  # Sun-Thu
+    weekday      = now.weekday()  # 0=Mon 6=Sun
+    is_trading_day  = weekday in (6, 0, 1, 2, 3)
     is_trading_hour = (cairo_hour == 10 and cairo_minute >= 0) or \
                       (10 < cairo_hour < 14) or \
                       (cairo_hour == 14 and cairo_minute <= 30)
     return is_trading_day and is_trading_hour
 
+# ─── Price logic ──────────────────────────────────────────────────────────────
+
 def fetch_stock(ticker: str, name: str) -> dict:
     try:
         t    = yf.Ticker(ticker)
-        info = t.fast_info
-        price      = round(float(info.last_price), 2)     if info.last_price     else None
-        prev_close = round(float(info.previous_close), 2) if info.previous_close else None
-        volume     = int(info.last_volume) if hasattr(info, 'last_volume') and info.last_volume else None
+        info = t.info
+        price      = info.get("regularMarketPrice") or info.get("currentPrice")
+        prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
+        volume     = info.get("regularMarketVolume")
+        price      = round(float(price), 2)      if price      else None
+        prev_close = round(float(prev_close), 2) if prev_close else None
+        volume     = int(volume)                 if volume      else None
         market_open = is_egx_open()
+        change_pct  = round(((price - prev_close) / prev_close) * 100, 2) if price and prev_close else None
 
-        # Only calculate change_pct when market is open and volume confirms trading
-        if price and prev_close and market_open and volume:
-            change_pct = round(((price - prev_close) / prev_close) * 100, 2)
+        if not volume:
+            change_pct = None
+            status = "market_closed"
+        elif market_open and volume:
             status = "live"
-        elif price and prev_close and not market_open:
-            change_pct = None
-            status = "market_closed — price is last session close, change % not reliable"
         else:
-            change_pct = None
-            status = "unavailable"
+            status = "post_market"
 
         return {
-            "symbol": ticker.replace('.CA', ''), "name": name,
-            "price": price, "prev_close": prev_close,
-            "change_pct": change_pct, "volume": volume,
-            "market_open": market_open, "status": status,
-            "timestamp": datetime.now().isoformat(), "source": "yahoo_finance"
+            "symbol":      ticker.replace('.CA', ''),
+            "name":        name,
+            "price":       price,
+            "prev_close":  prev_close,
+            "change_pct":  change_pct,
+            "volume":      volume,
+            "market_open": market_open,
+            "status":      status,
+            "timestamp":   datetime.now().isoformat(),
+            "source":      "yahoo_finance"
         }
     except Exception as e:
         logging.warning(f"yfinance failed for {ticker}: {e}")
-        return {"symbol": ticker.replace('.CA', ''), "name": name,
-                "price": None, "change_pct": None, "volume": None,
-                "market_open": False, "status": "unavailable",
-                "timestamp": datetime.now().isoformat(), "source": "unavailable"}
+        return {
+            "symbol": ticker.replace('.CA', ''), "name": name,
+            "price": None, "change_pct": None, "volume": None,
+            "market_open": False, "status": "unavailable",
+            "timestamp": datetime.now().isoformat(), "source": "unavailable"
+        }
 
 def get_all_prices():
     stocks  = [fetch_stock(t, n) for t, n in WATCHLIST.items()]
     valid   = [s for s in stocks if s.get("price")]
     gainers = [s for s in valid if s.get("change_pct") and s["change_pct"] > 0]
     losers  = [s for s in valid if s.get("change_pct") and s["change_pct"] < 0]
-    return {"timestamp": datetime.now().isoformat(), "count": len(valid), "stocks": stocks,
-            "summary": {"gainers": len(gainers), "losers": len(losers),
-                        "flat": len(valid) - len(gainers) - len(losers)}}
+    return {
+        "timestamp":   datetime.now().isoformat(),
+        "market_open": is_egx_open(),
+        "count":       len(valid),
+        "stocks":      stocks,
+        "summary":     {
+            "gainers": len(gainers),
+            "losers":  len(losers),
+            "flat":    len(valid) - len(gainers) - len(losers)
+        }
+    }
 
 def get_single_price(symbol: str):
     ticker = f"{symbol.upper()}.CA"
     return fetch_stock(ticker, WATCHLIST.get(ticker, symbol.upper()))
 
-# ─── Chart + Technicals ───────────────────────────────────────────────────────
+# ─── Tool execution ───────────────────────────────────────────────────────────
 
-def calc_rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return None
-    deltas = np.diff(closes)
-    gains  = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    avg_g  = np.mean(gains[:period])
-    avg_l  = np.mean(losses[:period])
-    for i in range(period, len(gains)):
-        avg_g = (avg_g * (period-1) + gains[i]) / period
-        avg_l = (avg_l * (period-1) + losses[i]) / period
-    if avg_l == 0:
-        return 100.0
-    rs = avg_g / avg_l
-    return round(100 - (100 / (1 + rs)), 2)
+def execute_tool(name: str, args: dict) -> str:
+    if name == "get_egx_prices":
+        return json.dumps(get_all_prices())
+    elif name == "get_egx_stock":
+        return json.dumps(get_single_price(args.get("symbol", "")))
+    return json.dumps({"error": f"Unknown tool: {name}"})
 
-def calc_ma(closes, period):
-    if len(closes) < period:
-        return None
-    return round(float(np.mean(closes[-period:])), 2)
+def make_response(mid, result):
+    return json.dumps({"jsonrpc": "2.0", "id": mid, "result": result})
 
-def get_chart_data(symbol: str, period: str = "3mo") -> dict:
-    try:
-        ticker = f"{symbol.upper()}.CA"
-        t      = yf.Ticker(ticker)
-        hist   = t.history(period=period)
-        if hist.empty:
-            return {"error": f"No chart data for {symbol}"}
-        candles = []
-        for date, row in hist.iterrows():
-            candles.append({
-                "date":   date.strftime("%Y-%m-%d"),
-                "open":   round(float(row["Open"]),  2),
-                "high":   round(float(row["High"]),  2),
-                "low":    round(float(row["Low"]),   2),
-                "close":  round(float(row["Close"]), 2),
-                "volume": int(row["Volume"])
-            })
-        closes     = np.array([c["close"] for c in candles])
-        rsi        = calc_rsi(closes)
-        ma20       = calc_ma(closes, 20)
-        ma50       = calc_ma(closes, 50)
-        latest     = candles[-1]
-        first      = candles[0]
-        period_chg = round(((latest["close"] - first["close"]) / first["close"]) * 100, 2)
-
-        # Simple signal
-        signal = "neutral"
-        if rsi and ma20 and ma50:
-            if rsi < 35 and latest["close"] > ma20:
-                signal = "buy — oversold, price above MA20"
-            elif rsi > 65 and latest["close"] < ma20:
-                signal = "sell — overbought, price below MA20"
-            elif latest["close"] > ma20 > ma50:
-                signal = "bullish — price above MA20 > MA50"
-            elif latest["close"] < ma20 < ma50:
-                signal = "bearish — price below MA20 < MA50"
-
-        return {
-            "symbol": symbol.upper(), "name": WATCHLIST.get(ticker, symbol.upper()),
-            "period": period, "candles": candles, "total_candles": len(candles),
-            "period_change_pct": period_chg,
-            "technicals": {"rsi": rsi, "ma20": ma20, "ma50": ma50, "signal": signal},
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-# ─── Portfolio ────────────────────────────────────────────────────────────────
-
-def get_portfolio():
-    if not PORTFOLIO:
-        return {"message": "Portfolio is empty. Add stocks with add_to_portfolio.", "holdings": [], "total_value": 0}
-    holdings = []
-    total_value = 0
-    total_cost  = 0
-    for sym, h in PORTFOLIO.items():
-        stock = get_single_price(sym)
-        price = stock.get("price")
-        qty   = h["qty"]
-        avg   = h["avg_buy"]
-        value = round(price * qty, 2) if price else None
-        cost  = round(avg * qty, 2)
-        pnl   = round(value - cost, 2) if value else None
-        pnl_pct = round(((price - avg) / avg) * 100, 2) if price else None
-        if value:
-            total_value += value
-        total_cost += cost
-        holdings.append({
-            "symbol": sym, "name": stock.get("name", sym),
-            "qty": qty, "avg_buy": avg, "current_price": price,
-            "value": value, "cost": cost, "pnl": pnl, "pnl_pct": pnl_pct,
-            "change_pct_today": stock.get("change_pct")
+def handle_message(body: dict) -> str:
+    method = body.get("method", "")
+    mid    = body.get("id", 1)
+    if method == "initialize":
+        return make_response(mid, {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "egx-mcp-server", "version": "1.0.0"}
         })
-    total_pnl     = round(total_value - total_cost, 2)
-    total_pnl_pct = round((total_pnl / total_cost) * 100, 2) if total_cost else 0
-    return {
-        "holdings": holdings,
-        "total_value": round(total_value, 2),
-        "total_cost":  round(total_cost, 2),
-        "total_pnl":   total_pnl,
-        "total_pnl_pct": total_pnl_pct,
-        "timestamp": datetime.now().isoformat()
-    }
+    elif method == "tools/list":
+        return make_response(mid, {"tools": MCP_TOOLS})
+    elif method == "tools/call":
+        name   = body.get("params", {}).get("name", "")
+        args   = body.get("params", {}).get("arguments", {})
+        result = execute_tool(name, args)
+        return make_response(mid, {
+            "content": [{"type": "text", "text": result}],
+            "isError": False
+        })
+    elif method in ("notifications/initialized", "ping"):
+        return make_response(mid, {})
+    else:
+        return json.dumps({"jsonrpc": "2.0", "id": mid,
+            "error": {"code": -32601, "message": f"Method not found: {method}"}})
 
-# ─── Alerts ───────────────────────────────────────────────────────────────────
+# ─── OAuth ────────────────────────────────────────────────────────────────────
 
-def check_alerts():
-    triggered = []
-    for sym, thresholds in ALERTS.items():
-        stock = get_single_price(sym)
-        price = stock.get("price")
-        if not price:
-            continue
-        if "above" in thresholds and price >= thresholds["above"]:
-            triggered.append({"symbol": sym, "type": "above",
-                "threshold": thresholds["above"], "current_price": price,
-                "message": f"{sym} is at EGP {price} — above your alert of EGP {thresholds['above']}"})
-        if "below" in thresholds and price <= thresholds["below"]:
-            triggered.append({"symbol": sym, "type": "below",
-                "threshold": thresholds["below"], "current_price": price,
-                "message": f"{sym} is at EGP {price} — below your alert of EGP {thresholds['below']}"})
-    return {"alerts_set": ALERTS, "triggered": triggered,
-            "triggered_count": len(triggered), "timestamp": datetime.now().isoformat()}
+def get_base(request: Request):
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+    return f"https://{host}"
 
-# ─── Macro ────────────────────────────────────────────────────────────────────
+@app.get("/.well-known/oauth-authorization-server")
+@app.get("/.well-known/oauth-authorization-server/{path:path}")
+def oauth_server(request: Request, path: str = ""):
+    base = get_base(request)
+    return JSONResponse({
+        "issuer": base,
+        "authorization_endpoint": f"{base}/oauth/authorize",
+        "token_endpoint": f"{base}/oauth/token",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"]
+    })
 
-def get_macro():
-    tickers = {"USD_EGP": "EGP=X", "Oil_Brent": "BZ=F", "Gold": "GC=F", "EGX30": "^EGX30"}
-    result  = {}
-    for name, ticker in tickers.items():
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/{path:path}")
+def oauth_resource(request: Request, path: str = ""):
+    base = get_base(request)
+    return JSONResponse({
+        "resource": base,
+        "authorization_servers": [base],
+        "bearer_methods_supported": ["header"]
+    })
+
+@app.get("/oauth/authorize")
+def oauth_authorize(request: Request):
+    redirect_uri = request.query_params.get("redirect_uri", "")
+    state        = request.query_params.get("state", "")
+    return RedirectResponse(url=f"{redirect_uri}?code=egx-code-2024&state={state}")
+
+@app.post("/oauth/token")
+async def oauth_token():
+    return JSONResponse({
+        "access_token": "egx-token-2024",
+        "token_type":   "bearer",
+        "expires_in":   99999999,
+        "scope":        "read"
+    })
+
+# ─── MCP SSE ─────────────────────────────────────────────────────────────────
+
+@app.get("/sse")
+@app.post("/sse")
+async def sse(request: Request):
+    base = get_base(request)
+    if request.method == "POST":
         try:
-            t    = yf.Ticker(ticker)
-            info = t.fast_info
-            price = round(float(info.last_price), 2) if info.last_price else None
-            prev  = round(float(info.previous_close), 2) if info.previous_close else None
-            chg   = round(((price-prev)/prev)*100, 2) if price and prev else None
-            result[name] = {"price": price, "change_pct": chg}
-        except:
-            result[name] = {"price": None, "change_pct": None}
-    result["timestamp"] = datetime.now().isoformat()
-    return result
+            body   = await request.json()
+            result = handle_message(body)
+            async def post_stream():
+                yield f"data: {result}\n\n"
+            return StreamingResponse(post_stream(), media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
 
-# ─── MCP Tools list ───────────────────────────────────────────────────────────
+    async def get_stream():
+        yield f"event: endpoint\ndata: {base}/messages\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            yield ": ping\n\n"
+            await asyncio.sleep(15)
 
-MCP_TOOLS = [
-    {
-        "name": "get_egx_prices",
-        "description": "Get live prices for all EGX watchlist stocks. Returns price EGP, change %, volume.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "get_egx_stock",
-        "description": "Get live price for any single EGX stock by ticker.",
-        "inputSchema": {"type": "object",
-            "properties": {"symbol": {"type": "string", "description": "EGX ticker e.g. COMI, CSAG"}},
-            "required": ["symbol"]}
-    },
-    {
-        "name": "get_egx_chart",
-        "description": "Get historical OHLCV candles + RSI + MA20 + MA50 + trading signal for any EGX stock.",
-        "inputSchema": {"type": "object",
-            "properties": {
-                "symbol": {"type": "string", "description": "EGX ticker"},
-                "period": {"type": "string", "description": "1mo 3mo 6mo 1y 2y — default 3mo"}
-            }, "required": ["symbol"]}
-    },
-    {
-        "name": "get_portfolio",
-        "description": "Get current portfolio with live P&L, total value, and today's change for each holding.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "add_to_portfolio",
-        "description": "Add or update a stock in the portfolio with quantity and average buy price.",
-        "inputSchema": {"type": "object",
-            "properties": {
-                "symbol":    {"type": "string"},
-                "qty":       {"type": "number", "description": "Number of shares"},
-                "avg_buy":   {"type": "number", "description": "Average buy price in EGP"}
-            }, "required": ["symbol", "qty", "avg_buy"]}
-    },
-    {
-        "name": "remove_from_portfolio",
-        "description": "Remove a stock from the portfolio.",
-        "inputSchema": {"type": "object",
-            "properties": {"symbol": {"type": "string"}},
-            "required": ["symbol"]}
-    },
-    {
-        "name": "set_alert",
-        "description": "Set a price alert for a stock. Triggers when price goes above or below threshold.",
-        "inputSchema": {"type": "object",
-            "properties": {
-                "symbol": {"type": "string"},
-                "above":  {"type": "number", "description": "Alert when price rises above this EGP value"},
-                "below":  {"type": "number", "description": "Alert when price drops below this EGP value"}
-            }, "required": ["symbol"]}
-    },
-    {
-        "name": "check_alerts",
-        "description": "Check all price alerts and return which ones have been triggered.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "get_macro",
-        "description": "Get key macro indicators: USD/EGP rate
+    return StreamingResponse(get_stream(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+@app.post("/messages")
+async def messages(request: Request):
+    body   = await request.json()
+    result = handle_message(body)
+    return JSONResponse(json.loads(result))
+
+# ─── REST endpoints ───────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "time": datetime.now().isoformat(), "market_open": is_egx_open()}
+
+@app.get("/prices")
+def prices():
+    return get_all_prices()
+
+@app.get("/price/{symbol}")
+def price(symbol: str):
+    return get_single_price(symbol)
