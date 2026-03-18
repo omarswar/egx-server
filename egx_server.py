@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 import yfinance as yf
+import requests
 import json
 import asyncio
 import logging
