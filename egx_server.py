@@ -278,13 +278,21 @@ def price(symbol: str):
 
 @app.get("/debug/{symbol}")
 def debug(symbol: str):
-    """Test Twelve Data API directly — shows raw response"""
-    try:
-        r = requests.get(
-            "https://api.twelvedata.com/quote",
-            params={"symbol": symbol.upper(), "exchange": "XCAI", "apikey": TWELVE_API_KEY},
-            timeout=15
-        )
-        return {"status": r.status_code, "raw": r.json()}
-    except Exception as e:
-        return {"error": str(e)}
+    """Test multiple symbol formats against Twelve Data"""
+    results = {}
+    formats = [
+        {"symbol": symbol.upper(), "exchange": "XCAI"},
+        {"symbol": f"{symbol.upper()}:XCAI"},
+        {"symbol": symbol.upper(), "country": "Egypt"},
+        {"symbol": symbol.upper(), "exchange": "EGX"},
+        {"symbol": symbol.upper(), "exchange": "CAI"},
+    ]
+    for params in formats:
+        try:
+            p = {**params, "apikey": TWELVE_API_KEY}
+            r = requests.get("https://api.twelvedata.com/quote", params=p, timeout=10)
+            key = str(params)
+            results[key] = r.json()
+        except Exception as e:
+            results[str(params)] = {"error": str(e)}
+    return results
