@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 import requests
+import re
 import json
 import asyncio
 import logging
@@ -77,6 +78,61 @@ def is_egx_open() -> bool:
 
 def fetch_stock(symbol: str, name: str) -> dict:
     try:
+        # Try Google Finance first — free, live, not blocked
+        url  = f"https://www.google.com/finance/quote/{symbol}:EGX"
+        r    = requests.get(url, headers=HEADERS, timeout=12)
+        r.raise_for_status()
+        html = r.text
+
+        # Google Finance embeds price data in JSON-LD and data attributes
+        import re
+        price      = None
+        change_pct = None
+
+        # Extract price from JSON data in page
+        m = re.search(r'"price"\s*:\s*"?([\d.]+)"?', html)
+        if m:
+            price = round(float(m.group(1)), 2)
+
+        # Try data-last-price attribute
+        if not price:
+            m = re.search(r'data-last-price="([\d.]+)"', html)
+            if m:
+                price = round(float(m.group(1)), 2)
+
+        # Try extracting from structured data
+        if not price:
+            m = re.search(r'"lastPrice"[:\s]+"?([\d.]+)"?', html)
+            if m:
+                price = round(float(m.group(1)), 2)
+
+        # Change %
+        m = re.search(r'"percentChange"[:\s]+"?([+-]?[\d.]+)"?', html)
+        if m:
+            change_pct = round(float(m.group(1)), 2)
+
+        if price:
+            market_open = is_egx_open()
+            return {
+                "symbol": symbol, "name": name,
+                "price": price, "prev_close": None,
+                "change_pct": change_pct if market_open else None,
+                "volume": None, "market_open": market_open,
+                "status": "live" if market_open else "market_closed",
+                "timestamp": datetime.now().isoformat(),
+                "source": "google_finance"
+            }
+
+        # Fallback to EODHD for last close
+        return fetch_eodhd(symbol, name)
+
+    except Exception as e:
+        logging.warning(f"Google Finance failed for {symbol}: {e}")
+        return fetch_eodhd(symbol, name)
+
+
+def fetch_eodhd(symbol: str, name: str) -> dict:
+    try:
         r = requests.get(
             f"{EODHD_BASE}/real-time/{symbol}.EGX",
             params={"api_token": EODHD_API_KEY, "fmt": "json"},
@@ -84,7 +140,6 @@ def fetch_stock(symbol: str, name: str) -> dict:
         )
         r.raise_for_status()
         d = r.json()
-        logging.info(f"EODHD response for {symbol}: {d}")
 
         def parse(val):
             try:
@@ -94,43 +149,27 @@ def fetch_stock(symbol: str, name: str) -> dict:
                 return None
 
         market_open = is_egx_open()
-
-        # Use live close if available, fall back to previousClose
         live_close  = parse(d.get("close"))
         prev_close  = parse(d.get("previousClose"))
         price       = live_close if live_close else prev_close
         change_pct  = parse(d.get("change_p"))
         volume      = parse(d.get("volume"))
 
-        if price:
-            price = round(price, 2)
-        if prev_close:
-            prev_close = round(prev_close, 2)
-        if change_pct:
-            change_pct = round(change_pct, 2)
-        if volume:
-            volume = int(volume)
+        if price:      price      = round(price, 2)
+        if prev_close: prev_close = round(prev_close, 2)
+        if change_pct: change_pct = round(change_pct, 2)
+        if volume:     volume     = int(volume)
 
-        # If no live close, calculate change from previousClose only when market open
-        if not live_close and prev_close:
-            status = "market_closed"
-            change_pct = None
-        elif market_open and live_close:
-            status = "live"
-        else:
-            status = "market_closed"
+        status = "live" if market_open and live_close else "market_closed"
 
         return {
-            "symbol":      symbol,
-            "name":        name,
-            "price":       price,
-            "prev_close":  prev_close,
-            "change_pct":  change_pct if market_open else None,
-            "volume":      volume,
-            "market_open": market_open,
-            "status":      status,
-            "timestamp":   datetime.now().isoformat(),
-            "source":      "eodhd.com"
+            "symbol": symbol, "name": name,
+            "price": price, "prev_close": prev_close,
+            "change_pct": change_pct if market_open and live_close else None,
+            "volume": volume, "market_open": market_open,
+            "status": status,
+            "timestamp": datetime.now().isoformat(),
+            "source": "eodhd.com (last close)"
         }
     except Exception as e:
         logging.error(f"EODHD fetch failed for {symbol}: {e}")
@@ -298,13 +337,24 @@ def price(symbol: str):
 
 @app.get("/debug/{symbol}")
 def debug(symbol: str):
-    """Test EODHD API directly"""
-    try:
-        r = requests.get(
-            f"{EODHD_BASE}/real-time/{symbol.upper()}.EGX",
-            params={"api_token": EODHD_API_KEY, "fmt": "json"},
-            timeout=15
-        )
-        return {"status": r.status_code, "raw": r.json()}
-    except Exception as e:
-        return {"error": str(e)}
+    """Test multiple Mubasher API endpoint patterns"""
+    results = {}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "Origin": "https://english.mubasher.info",
+        "Referer": "https://english.mubasher.info/",
+    }
+    urls = [
+        f"https://api-community.mubasher.info/api/v1/securities/{symbol}/CASE/snapshot",
+        f"https://api-community.mubasher.info/api/v1/securities/{symbol}/EGX/snapshot",
+        f"https://api-community.mubasher.info/api/v1/market/securities/snapshot?exchange=CASE&symbol={symbol}",
+        f"https://api-community.mubasher.info/api/v1/securities/CASE/{symbol}",
+        f"https://api-community.mubasher.info/api/v1/quotes/CASE/{symbol}",
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, headers=headers, timeout=8)
+            results[url] = {"status": r.status_code, "data": r.text[:300]}
+        except Exception as e:
+            results[url] = {"error": str(e)}
+    return results
