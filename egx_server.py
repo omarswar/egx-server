@@ -102,6 +102,9 @@ def is_egx_open() -> bool:
 
 # ─── Price logic ──────────────────────────────────────────────────────────────
 
+# Reverse map: ticker -> clean symbol
+SYMBOL_MAP_REVERSE = {v: k for k, v in SYMBOL_MAP.items()}
+
 def is_sane(symbol: str, price: float) -> bool:
     """Check if price is within expected range for this stock"""
     lo, hi = PRICE_RANGES.get(symbol, (0.1, 100000))
