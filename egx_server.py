@@ -97,7 +97,8 @@ MCP_TOOLS = [
 # ─── OAuth endpoints (required by Claude.ai connector) ───────────────────────
 
 @app.get("/.well-known/oauth-authorization-server")
-def oauth_metadata(request: Request):
+@app.get("/.well-known/oauth-authorization-server/{path:path}")
+def oauth_metadata(request: Request, path: str = ""):
     base = str(request.base_url).rstrip("/").replace("http://", "https://")
     return JSONResponse({
         "issuer": base,
@@ -106,6 +107,16 @@ def oauth_metadata(request: Request):
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"]
+    })
+
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/{path:path}")
+def oauth_protected_resource(request: Request, path: str = ""):
+    base = str(request.base_url).rstrip("/").replace("http://", "https://")
+    return JSONResponse({
+        "resource": base,
+        "authorization_servers": [base],
+        "bearer_methods_supported": ["header"]
     })
 
 @app.get("/oauth/authorize")
@@ -129,6 +140,7 @@ async def oauth_token(request: Request):
 # ─── MCP SSE + messages ───────────────────────────────────────────────────────
 
 @app.get("/sse")
+@app.post("/sse")
 async def sse_endpoint(request: Request):
     async def stream():
         yield "event: endpoint\ndata: /messages\n\n"
