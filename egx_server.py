@@ -6,6 +6,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 import requests
+from bs4 import BeautifulSoup
+import re
 import json
 import asyncio
 import logging
