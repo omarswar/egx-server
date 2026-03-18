@@ -23,20 +23,36 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# EGX stocks on Yahoo Finance — tested suffixes
+# Correct Yahoo Finance tickers for EGX stocks (using ISIN.CA format where needed)
 WATCHLIST = {
-    'COMI.CA':  'Commercial International Bank',
-    'EAST.CA':  'Eastern Company',
-    'TMGH.CA':  'Talaat Moustafa Group',
-    'SWDY.CA':  'ElSewedy Electric',
-    'HRHO.CA':  'Emaar Misr',
-    'EFIC.CA':  'EFG Hermes',
-    'JUFO.CA':  'Juhayna Food Industries',
-    'CSAG.CA':  'Canal Shipping Agencies',
-    'SKPC.CA':  'Sidi Kerir Petrochemicals',
-    'ABUK.CA':  'Abu Kir Fertilizers',
-    'MFPC.CA':  'Misr Fertilizers',
-    'ETEL.CA':  'Telecom Egypt',
+    'COMI.CA':          'Commercial International Bank',
+    'EAST.CA':          'Eastern Company',
+    'TMGH.CA':          'Talaat Moustafa Group',
+    'SWDY.CA':          'ElSewedy Electric',
+    'HRHO.CA':          'Emaar Misr',
+    'EFIC.CA':          'EFG Hermes',
+    'JUFO.CA':          'Juhayna Food Industries',
+    'CSAG.CA':          'Canal Shipping Agencies',
+    'SKPC.CA':          'Sidi Kerir Petrochemicals',
+    'EGS38191C010.CA':  'Abu Kir Fertilizers',       # ABUK
+    'MFPC.CA':          'Misr Fertilizers',
+    'ETEL.CA':          'Telecom Egypt',
+}
+
+# Map clean symbol to ticker for single stock lookup
+SYMBOL_MAP = {
+    'COMI': 'COMI.CA',
+    'EAST': 'EAST.CA',
+    'TMGH': 'TMGH.CA',
+    'SWDY': 'SWDY.CA',
+    'HRHO': 'HRHO.CA',
+    'EFIC': 'EFIC.CA',
+    'JUFO': 'JUFO.CA',
+    'CSAG': 'CSAG.CA',
+    'SKPC': 'SKPC.CA',
+    'ABUK': 'EGS38191C010.CA',
+    'MFPC': 'MFPC.CA',
+    'ETEL': 'ETEL.CA',
 }
 
 # Known reasonable price ranges for sanity check (EGP)
@@ -50,7 +66,7 @@ PRICE_RANGES = {
     'JUFO':  (5,    50),
     'CSAG':  (10,   60),
     'SKPC':  (5,    50),
-    'ABUK':  (30,   150),
+    'ABUK':  (60,   150),
     'MFPC':  (20,   100),
     'ETEL':  (30,   150),
 }
