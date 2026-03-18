@@ -1,16 +1,15 @@
 """
-EGX MCP Server — prices scraped from Arab Finance
+EGX MCP Server — Twelve Data API for accurate live EGX prices
 """
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 import requests
-from bs4 import BeautifulSoup
-import re
 import json
 import asyncio
 import logging
+import os
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
@@ -24,11 +23,8 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
+# Hardcoded as fallback — set TWELVE_API_KEY in Railway env vars to override
+TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY", "c9a66d1c2370438daa76b1d5d22498b4")
 
 WATCHLIST = {
     'COMI': 'Commercial International Bank',
@@ -43,32 +39,6 @@ WATCHLIST = {
     'ABUK': 'Abu Kir Fertilizers',
     'MFPC': 'Misr Fertilizers',
     'ETEL': 'Telecom Egypt',
-}
-
-logging.basicConfig(level=logging.INFO)
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
-
-WATCHLIST = {
-    'COMI.CA': 'Commercial International Bank',
-    'EAST.CA': 'Eastern Company',
-    'TMGH.CA': 'Talaat Moustafa Group',
-    'SWDY.CA': 'ElSewedy Electric',
-    'HRHO.CA': 'Emaar Misr',
-    'EFIC.CA': 'EFG Hermes',
-    'JUFO.CA': 'Juhayna Food Industries',
-    'CSAG.CA': 'Canal Shipping Agencies',
-    'SKPC.CA': 'Sidi Kerir Petrochemicals',
-    'ABUK.CA': 'Abu Kir Fertilizers',
-    'MFPC.CA': 'Misr Fertilizers',
-    'ETEL.CA': 'Telecom Egypt',
 }
 
 MCP_TOOLS = [
@@ -106,49 +76,56 @@ def is_egx_open() -> bool:
 
 # ─── Price logic ──────────────────────────────────────────────────────────────
 
-def fetch_stock(ticker: str, name: str) -> dict:
+def fetch_stock(symbol: str, name: str) -> dict:
     try:
-        t    = yf.Ticker(ticker)
-        info = t.info
-        price      = info.get("regularMarketPrice") or info.get("currentPrice")
-        prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
-        volume     = info.get("regularMarketVolume")
-        price      = round(float(price), 2)      if price      else None
-        prev_close = round(float(prev_close), 2) if prev_close else None
-        volume     = int(volume)                 if volume      else None
-        market_open = is_egx_open()
-        change_pct = round(((price - prev_close) / prev_close) * 100, 2) if price and prev_close else None
+        # Single API call using /quote endpoint — returns price + prev_close + change + volume
+        r = requests.get(
+            "https://api.twelvedata.com/quote",
+            params={"symbol": symbol, "exchange": "XCAI", "apikey": TWELVE_API_KEY},
+            timeout=15
+        )
+        r.raise_for_status()
+        d = r.json()
 
-        if market_open:
-            status = "live"
-        elif volume:
-            status = "post_market"
-        else:
-            status = "market_closed"
+        # Log raw response for debugging
+        logging.info(f"Twelve Data response for {symbol}: {d}")
+
+        if d.get("status") == "error" or "code" in d:
+            logging.warning(f"Twelve Data error for {symbol}: {d.get('message', d)}")
+            return _unavailable(symbol, name)
+
+        price      = round(float(d["close"]), 2)            if d.get("close")            else None
+        prev_close = round(float(d["previous_close"]), 2)   if d.get("previous_close")   else None
+        change_pct = round(float(d["percent_change"]), 2)   if d.get("percent_change")   else None
+        volume     = int(d["volume"])                        if d.get("volume")           else None
+        market_open = is_egx_open()
 
         return {
-            "symbol":      ticker.replace('.CA', ''),
+            "symbol":      symbol,
             "name":        name,
             "price":       price,
             "prev_close":  prev_close,
-            "change_pct":  change_pct,
+            "change_pct":  change_pct if market_open else None,
             "volume":      volume,
             "market_open": market_open,
-            "status":      status,
+            "status":      "live" if market_open and price else "market_closed" if price else "unavailable",
             "timestamp":   datetime.now().isoformat(),
-            "source":      "yahoo_finance"
+            "source":      "twelvedata.com"
         }
     except Exception as e:
-        logging.warning(f"yfinance failed for {ticker}: {e}")
-        return {
-            "symbol": ticker.replace('.CA', ''), "name": name,
-            "price": None, "change_pct": None, "volume": None,
-            "market_open": False, "status": "unavailable",
-            "timestamp": datetime.now().isoformat(), "source": "unavailable"
-        }
+        logging.error(f"fetch_stock failed for {symbol}: {e}")
+        return _unavailable(symbol, name)
+
+def _unavailable(symbol, name):
+    return {
+        "symbol": symbol, "name": name,
+        "price": None, "change_pct": None, "volume": None,
+        "market_open": False, "status": "unavailable",
+        "timestamp": datetime.now().isoformat(), "source": "unavailable"
+    }
 
 def get_all_prices():
-    stocks  = [fetch_stock(t, n) for t, n in WATCHLIST.items()]
+    stocks  = [fetch_stock(s, n) for s, n in WATCHLIST.items()]
     valid   = [s for s in stocks if s.get("price")]
     gainers = [s for s in valid if s.get("change_pct") and s["change_pct"] > 0]
     losers  = [s for s in valid if s.get("change_pct") and s["change_pct"] < 0]
@@ -157,17 +134,13 @@ def get_all_prices():
         "market_open": is_egx_open(),
         "count":       len(valid),
         "stocks":      stocks,
-        "summary":     {
-            "gainers": len(gainers),
-            "losers":  len(losers),
-            "flat":    len(valid) - len(gainers) - len(losers)
-        }
+        "summary":     {"gainers": len(gainers), "losers": len(losers),
+                        "flat":    len(valid) - len(gainers) - len(losers)}
     }
 
 def get_single_price(symbol: str):
-    clean = symbol.upper().replace('.CA', '')
-    ticker = f"{clean}.CA"
-    return fetch_stock(ticker, WATCHLIST.get(ticker, clean))
+    sym = symbol.upper().replace('.CA', '')
+    return fetch_stock(sym, WATCHLIST.get(sym, sym))
 
 # ─── Tool execution ───────────────────────────────────────────────────────────
 
@@ -288,7 +261,12 @@ async def messages(request: Request):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "time": datetime.now().isoformat(), "market_open": is_egx_open()}
+    return {
+        "status": "ok",
+        "time": datetime.now().isoformat(),
+        "market_open": is_egx_open(),
+        "api_key_set": bool(TWELVE_API_KEY)
+    }
 
 @app.get("/prices")
 def prices():
@@ -297,3 +275,16 @@ def prices():
 @app.get("/price/{symbol}")
 def price(symbol: str):
     return get_single_price(symbol)
+
+@app.get("/debug/{symbol}")
+def debug(symbol: str):
+    """Test Twelve Data API directly — shows raw response"""
+    try:
+        r = requests.get(
+            "https://api.twelvedata.com/quote",
+            params={"symbol": symbol.upper(), "exchange": "XCAI", "apikey": TWELVE_API_KEY},
+            timeout=15
+        )
+        return {"status": r.status_code, "raw": r.json()}
+    except Exception as e:
+        return {"error": str(e)}
