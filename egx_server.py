@@ -1,5 +1,5 @@
 """
-EGX MCP Server — with OAuth support for Claude.ai connector
+EGX MCP Server — correct protocol matching Claude.ai connector spec
 """
 
 from fastapi import FastAPI, Request
@@ -19,6 +19,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 WATCHLIST = {
@@ -35,6 +36,25 @@ WATCHLIST = {
     'MFPC.CA': 'Misr Fertilizers',
     'ETEL.CA': 'Telecom Egypt',
 }
+
+MCP_TOOLS = [
+    {
+        "name": "get_egx_prices",
+        "description": "Get live EGX stock prices for the full watchlist. Returns price in EGP, change %, volume.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "get_egx_stock",
+        "description": "Get live price for any single EGX stock by ticker symbol e.g. COMI, CSAG, EAST.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "EGX stock ticker e.g. COMI, CSAG"}
+            },
+            "required": ["symbol"]
+        }
+    }
+]
 
 # ─── Price logic ─────────────────────────────────────────────────────────────
 
@@ -75,31 +95,46 @@ def execute_tool(name: str, args: dict) -> str:
         return json.dumps(get_single_price(args.get("symbol", "")))
     return json.dumps({"error": f"Unknown tool: {name}"})
 
-MCP_TOOLS = [
-    {
-        "name": "get_egx_prices",
-        "description": "Get live prices for all EGX watchlist stocks. Returns price in EGP, change %, and volume.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "get_egx_stock",
-        "description": "Get live price for any single EGX stock by ticker symbol.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "symbol": {"type": "string", "description": "EGX ticker e.g. COMI, CSAG, EAST"}
-            },
-            "required": ["symbol"]
-        }
-    }
-]
+def make_response(mid, result):
+    return json.dumps({"jsonrpc": "2.0", "id": mid, "result": result})
 
-# ─── OAuth endpoints (required by Claude.ai connector) ───────────────────────
+def handle_message(body: dict) -> str:
+    method = body.get("method", "")
+    mid    = body.get("id", 1)
+
+    if method == "initialize":
+        return make_response(mid, {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "egx-mcp-server", "version": "1.0.0"}
+        })
+    elif method == "tools/list":
+        return make_response(mid, {"tools": MCP_TOOLS})
+    elif method == "tools/call":
+        name   = body.get("params", {}).get("name", "")
+        args   = body.get("params", {}).get("arguments", {})
+        result = execute_tool(name, args)
+        return make_response(mid, {
+            "content": [{"type": "text", "text": result}],
+            "isError": False
+        })
+    elif method in ("notifications/initialized", "ping"):
+        return make_response(mid, {})
+    else:
+        return json.dumps({"jsonrpc": "2.0", "id": mid,
+            "error": {"code": -32601, "message": f"Method not found: {method}"}})
+
+# ─── OAuth ────────────────────────────────────────────────────────────────────
+
+def get_base(request: Request):
+    # Always return https for Railway
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+    return f"https://{host}"
 
 @app.get("/.well-known/oauth-authorization-server")
 @app.get("/.well-known/oauth-authorization-server/{path:path}")
-def oauth_metadata(request: Request, path: str = ""):
-    base = str(request.base_url).rstrip("/").replace("http://", "https://")
+def oauth_server(request: Request, path: str = ""):
+    base = get_base(request)
     return JSONResponse({
         "issuer": base,
         "authorization_endpoint": f"{base}/oauth/authorize",
@@ -111,8 +146,8 @@ def oauth_metadata(request: Request, path: str = ""):
 
 @app.get("/.well-known/oauth-protected-resource")
 @app.get("/.well-known/oauth-protected-resource/{path:path}")
-def oauth_protected_resource(request: Request, path: str = ""):
-    base = str(request.base_url).rstrip("/").replace("http://", "https://")
+def oauth_resource(request: Request, path: str = ""):
+    base = get_base(request)
     return JSONResponse({
         "resource": base,
         "authorization_servers": [base],
@@ -121,64 +156,59 @@ def oauth_protected_resource(request: Request, path: str = ""):
 
 @app.get("/oauth/authorize")
 def oauth_authorize(request: Request):
-    # Auto-approve — immediately redirect back with a code
     redirect_uri = request.query_params.get("redirect_uri", "")
     state        = request.query_params.get("state", "")
-    code         = "egx-auth-code-2024"
-    return RedirectResponse(url=f"{redirect_uri}?code={code}&state={state}")
+    return RedirectResponse(url=f"{redirect_uri}?code=egx-code-2024&state={state}")
 
 @app.post("/oauth/token")
-async def oauth_token(request: Request):
-    # Accept any code and return a static token
+async def oauth_token():
     return JSONResponse({
-        "access_token": "egx-static-token-2024",
+        "access_token": "egx-token-2024",
         "token_type":   "bearer",
         "expires_in":   99999999,
         "scope":        "read"
     })
 
-# ─── MCP SSE + messages ───────────────────────────────────────────────────────
+# ─── MCP SSE — single endpoint that handles full session ─────────────────────
 
 @app.get("/sse")
 @app.post("/sse")
-async def sse_endpoint(request: Request):
-    async def stream():
-        yield "event: endpoint\ndata: /messages\n\n"
+async def sse(request: Request):
+    base = get_base(request)
+
+    # If POST with JSON body — handle as message, return SSE with result
+    if request.method == "POST":
+        try:
+            body   = await request.json()
+            result = handle_message(body)
+            async def post_stream():
+                yield f"data: {result}\n\n"
+            return StreamingResponse(post_stream(), media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    # GET — open SSE stream, send endpoint event
+    async def get_stream():
+        yield f"event: endpoint\ndata: {base}/messages\n\n"
         while True:
             if await request.is_disconnected():
                 break
             yield ": ping\n\n"
             await asyncio.sleep(15)
-    return StreamingResponse(stream(), media_type="text/event-stream",
+
+    return StreamingResponse(get_stream(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
+# ─── Messages endpoint ────────────────────────────────────────────────────────
+
 @app.post("/messages")
-async def messages_endpoint(request: Request):
+async def messages(request: Request):
     body   = await request.json()
-    method = body.get("method", "")
-    mid    = body.get("id", 1)
+    result = handle_message(body)
+    return JSONResponse(json.loads(result))
 
-    if method == "initialize":
-        return JSONResponse({"jsonrpc": "2.0", "id": mid, "result": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "egx-mcp-server", "version": "1.0.0"}
-        }})
-    elif method == "tools/list":
-        return JSONResponse({"jsonrpc": "2.0", "id": mid, "result": {"tools": MCP_TOOLS}})
-    elif method == "tools/call":
-        name   = body.get("params", {}).get("name", "")
-        args   = body.get("params", {}).get("arguments", {})
-        result = execute_tool(name, args)
-        return JSONResponse({"jsonrpc": "2.0", "id": mid,
-            "result": {"content": [{"type": "text", "text": result}], "isError": False}})
-    elif method in ("notifications/initialized", "ping"):
-        return JSONResponse({"jsonrpc": "2.0", "id": mid, "result": {}})
-    else:
-        return JSONResponse({"jsonrpc": "2.0", "id": mid,
-            "error": {"code": -32601, "message": f"Method not found: {method}"}})
-
-# ─── Regular REST endpoints ───────────────────────────────────────────────────
+# ─── REST endpoints ───────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
