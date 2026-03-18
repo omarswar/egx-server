@@ -83,15 +83,14 @@ def fetch_stock(ticker: str, name: str) -> dict:
         prev_close = round(float(prev_close), 2) if prev_close else None
         volume     = int(volume)                 if volume      else None
         market_open = is_egx_open()
-        change_pct  = round(((price - prev_close) / prev_close) * 100, 2) if price and prev_close else None
+        change_pct = round(((price - prev_close) / prev_close) * 100, 2) if price and prev_close else None
 
-        if not volume:
-            change_pct = None
-            status = "market_closed"
-        elif market_open and volume:
+        if market_open:
             status = "live"
-        else:
+        elif volume:
             status = "post_market"
+        else:
+            status = "market_closed"
 
         return {
             "symbol":      ticker.replace('.CA', ''),
