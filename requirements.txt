@@ -3,3 +3,4 @@ uvicorn
 yfinance
 requests
 beautifulsoup4
+httpx
