@@ -65,14 +65,12 @@ MCP_TOOLS = [
 
 def is_egx_open() -> bool:
     """EGX trades Sun-Thu 10:00-14:30 Cairo time (UTC+2)"""
-    now          = datetime.utcnow()
-    cairo_hour   = (now.hour + 2) % 24
-    cairo_minute = now.minute
-    weekday      = now.weekday()  # 0=Mon 6=Sun
-    is_trading_day  = weekday in (6, 0, 1, 2, 3)
-    is_trading_hour = (cairo_hour == 10 and cairo_minute >= 0) or \
-                      (10 < cairo_hour < 14) or \
-                      (cairo_hour == 14 and cairo_minute <= 30)
+    from zoneinfo import ZoneInfo
+    now     = datetime.now(ZoneInfo("Africa/Cairo"))
+    weekday = now.weekday()  # 0=Mon, 6=Sun
+    h, m    = now.hour, now.minute
+    is_trading_day  = weekday in (6, 0, 1, 2, 3)  # Sun-Thu
+    is_trading_hour = (h == 10 and m >= 0) or (10 < h < 14) or (h == 14 and m <= 30)
     return is_trading_day and is_trading_hour
 
 # ─── Price logic ──────────────────────────────────────────────────────────────
@@ -88,11 +86,39 @@ def fetch_stock(symbol: str, name: str) -> dict:
         d = r.json()
         logging.info(f"EODHD response for {symbol}: {d}")
 
-        price      = round(float(d["close"]), 2)                        if d.get("close")          else None
-        prev_close = round(float(d["previousClose"]), 2)                if d.get("previousClose")  else None
-        change_pct = round(float(d["change_p"]), 2)                     if d.get("change_p")       else None
-        volume     = int(d["volume"])                                    if d.get("volume")         else None
+        def parse(val):
+            try:
+                v = float(val)
+                return v if v != 0 else None
+            except:
+                return None
+
         market_open = is_egx_open()
+
+        # Use live close if available, fall back to previousClose
+        live_close  = parse(d.get("close"))
+        prev_close  = parse(d.get("previousClose"))
+        price       = live_close if live_close else prev_close
+        change_pct  = parse(d.get("change_p"))
+        volume      = parse(d.get("volume"))
+
+        if price:
+            price = round(price, 2)
+        if prev_close:
+            prev_close = round(prev_close, 2)
+        if change_pct:
+            change_pct = round(change_pct, 2)
+        if volume:
+            volume = int(volume)
+
+        # If no live close, calculate change from previousClose only when market open
+        if not live_close and prev_close:
+            status = "market_closed"
+            change_pct = None
+        elif market_open and live_close:
+            status = "live"
+        else:
+            status = "market_closed"
 
         return {
             "symbol":      symbol,
@@ -102,7 +128,7 @@ def fetch_stock(symbol: str, name: str) -> dict:
             "change_pct":  change_pct if market_open else None,
             "volume":      volume,
             "market_open": market_open,
-            "status":      "live" if market_open and price else "market_closed" if price else "unavailable",
+            "status":      status,
             "timestamp":   datetime.now().isoformat(),
             "source":      "eodhd.com"
         }
