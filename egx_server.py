@@ -337,24 +337,31 @@ def price(symbol: str):
 
 @app.get("/debug/{symbol}")
 def debug(symbol: str):
-    """Test multiple Mubasher API endpoint patterns"""
-    results = {}
+    """Test Mubasher with exact browser headers"""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Accept-Language": "en",
         "Origin": "https://english.mubasher.info",
         "Referer": "https://english.mubasher.info/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "Priority": "u=1, i",
     }
+    results = {}
     urls = [
         f"https://api-community.mubasher.info/api/v1/securities/{symbol}/CASE/snapshot",
-        f"https://api-community.mubasher.info/api/v1/securities/{symbol}/EGX/snapshot",
-        f"https://api-community.mubasher.info/api/v1/market/securities/snapshot?exchange=CASE&symbol={symbol}",
-        f"https://api-community.mubasher.info/api/v1/securities/CASE/{symbol}",
+        f"https://api-community.mubasher.info/api/v1/securities/{symbol}/CASE",
+        f"https://api-community.mubasher.info/api/v1/market/CASE/securities/{symbol}",
         f"https://api-community.mubasher.info/api/v1/quotes/CASE/{symbol}",
+        f"https://api-community.mubasher.info/api/v1/securities/snapshot?exchange=CASE&symbol={symbol}",
     ]
     for url in urls:
         try:
             r = requests.get(url, headers=headers, timeout=8)
-            results[url] = {"status": r.status_code, "data": r.text[:300]}
+            results[url] = {"status": r.status_code, "data": r.text[:500]}
         except Exception as e:
             results[url] = {"error": str(e)}
     return results
